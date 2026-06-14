@@ -176,18 +176,32 @@ let _isConnectingWa = false;
 let _instanceName   = null; 
 
     // ─── Step actions (exposed globally so inline onclick can reach them) ──────
+    
+    // UPDATE: initiatePayment now opens the M-Pesa Modal
     window.initiatePayment = async function () {
-        showToast('Initiating payment…');
-        // TODO: replace mock with real payment integration
-        const client = getSupabase();
-        if (client) {
-            await client.from('business_onboarding')
-                .update({ credits_paid: true })
-                .eq('business_id', getBusinessId());
+        if (typeof window.openAddFundsModal === 'function') {
+            // Pre-set the value to 1000 for onboarding
+            const amountInput = document.getElementById('funds-amount');
+            if (amountInput) amountInput.value = 1000;
+            
+            window.openAddFundsModal();
+            showToast('Opening payment gateway...');
+            
+            // Start a small interval to check if balance has updated
+            const checkBalanceInterval = setInterval(async () => {
+                const client = getSupabase();
+                const { data } = await client.from('business_balances').select('balance_kes').eq('business_id', getBusinessId()).single();
+                
+                if (data && data.balance_kes >= 1000) {
+                    clearInterval(checkBalanceInterval);
+                    Object.assign(window.onboardingData, { credits_paid: true, balance_kes: data.balance_kes });
+                    await advanceStep(2);
+                    showToast('Payment confirmed!', 'success');
+                }
+            }, 5000);
+        } else {
+            console.error('Payment modal function not found.');
         }
-        Object.assign(window.onboardingData, { credits_paid: true });
-        showToast('Payment confirmed!');
-        await advanceStep(2);
     };
 
     window.openWhatsAppModal = async function () {
@@ -222,7 +236,7 @@ let _instanceName   = null;
         try {
             const businessId = getBusinessId();
             const websiteUrl = window.onboardingData?.website_url || "";
-            const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-ochestrator', {
+            const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-orchestrator', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action: 'create_instance', businessId, websiteUrl })
@@ -861,7 +875,7 @@ window.requestPairingCode = async function () {
         }
 
         try {
-            // UPDATED: Parallel fetch for onboarding status AND balance
+            // Parallel fetch for onboarding status AND balance
             const [onboardingRes, balanceRes] = await Promise.all([
                 client.from('business_onboarding').select('*').eq('business_id', activeId).maybeSingle(),
                 client.from('business_balances').select('balance_kes').eq('business_id', activeId).maybeSingle()
