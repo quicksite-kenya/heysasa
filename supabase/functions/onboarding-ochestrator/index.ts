@@ -17,58 +17,76 @@ serve(async (req: Request) => {
     const { action, businessId, phoneNumber } = await req.json()
     const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
     const instanceName = `heysasa_${businessId}`
+    const instanceToken = businessId // Using businessId as a stable token
 
-    // ACTION 1: Create Instance / Check Connection
     if (action === 'create_instance') {
-      const checkRes = await fetch(`${EVOLUTION_URL}/instance/connectionState/${instanceName}`, {
+      // 1. Cleanup old instances if they aren't 'open'
+      const statusRes = await fetch(`${EVOLUTION_URL}/instance/connectionState/${instanceName}`, {
         headers: { 'apikey': EVOLUTION_API_KEY }
       })
-      if (checkRes.ok) {
-        const state = await checkRes.json()
-        if (state.instance?.state === 'open') {
+      if (statusRes.ok) {
+        const statusData = await statusRes.json()
+        if (statusData.instance.state === 'open') {
           return new Response(JSON.stringify({ status: 'ALREADY_CONNECTED' }), { status: 200, headers: corsHeaders })
         }
         await fetch(`${EVOLUTION_URL}/instance/delete/${instanceName}`, { method: 'DELETE', headers: { 'apikey': EVOLUTION_API_KEY } })
       }
 
+      // 2. Create Instance
       await fetch(`${EVOLUTION_URL}/instance/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_API_KEY },
-        body: JSON.stringify({ name: instanceName, integration: "WHATSAPP-BAILEYS" })
+        body: JSON.stringify({ name: instanceName, token: instanceToken, integration: "WHATSAPP-BAILEYS" })
       })
 
-      const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
+      // 3. Initialize Connection
+      await fetch(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
         method: 'GET',
         headers: { 'apikey': EVOLUTION_API_KEY }
       })
-      const data = await connectRes.json()
 
-      return new Response(JSON.stringify({ qrcode: data.base64, instance_name: instanceName, status: 'QR_READY' }), { 
+      // 4. Fetch QR with Retry (Wait for Evolution to generate it)
+      let base64Qr = null
+      for (let i = 0; i < 5; i++) {
+        const qrRes = await fetch(`${EVOLUTION_URL}/instance/qr/${instanceName}`, {
+          method: 'GET',
+          headers: { 'apikey': EVOLUTION_API_KEY }
+        })
+        if (qrRes.ok) {
+          const qrData = await qrRes.json()
+          if (qrData.base64) {
+            base64Qr = qrData.base64
+            break
+          }
+        }
+        await new Promise(r => setTimeout(r, 2000)) // Wait 2s
+      }
+
+      if (!base64Qr) throw new Error("QR Code timed out. Please try again.")
+
+      return new Response(JSON.stringify({ qrcode: base64Qr, instance_name: instanceName }), { 
         status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } 
       })
     }
 
-    // ACTION 2: Get Pairing Code (The "Get Code" option)
     if (action === 'pair_phone') {
-      if (!phoneNumber) throw new Error("Phone number is required for pairing code");
-      
-      const cleanPhone = phoneNumber.replace(/\D/g, ''); // Ensure digits only
-
-      const pairRes = await fetch(`${EVOLUTION_URL}/instance/pair-code/${instanceName}?number=${cleanPhone}`, {
-        method: 'GET',
-        headers: { 'apikey': EVOLUTION_API_KEY }
-      })
-
-      const pairData = await pairRes.json()
-      
-      if (!pairRes.ok) throw new Error(pairData.message || "Failed to generate pairing code");
-
-      return new Response(JSON.stringify({ code: pairData.code, status: 'CODE_READY' }), { 
-        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } 
-      })
+        const cleanPhone = phoneNumber.replace(/\D/g, '')
+        const pairRes = await fetch(`${EVOLUTION_URL}/instance/pair/${instanceName}?number=${cleanPhone}`, {
+            method: 'GET',
+            headers: { 'apikey': EVOLUTION_API_KEY }
+        })
+        const pairData = await pairRes.json()
+        if (!pairRes.ok) throw new Error(pairData.message || "Pairing failed")
+        
+        return new Response(JSON.stringify({ pairing_code: pairData.code }), { 
+            status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } 
+        })
     }
 
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), { status: 200, headers: corsHeaders })
+    return new Response(JSON.stringify({ error: err.message }), { 
+      status: 200, // Return 200 to keep CORS happy, but include the error object
+      headers: { ...corsHeaders, "Content-Type": "application/json" } 
+    })
   }
 })

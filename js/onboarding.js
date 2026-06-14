@@ -348,8 +348,11 @@ let _instanceName   = null;
 
 window.requestPairingCode = async function () {
     const input = document.getElementById('wa-phone-input');
-    const phoneNumber = input?.value?.trim();
+    let phoneNumber = input?.value?.trim();
     if (!phoneNumber) { showToast('Enter your phone number first', 'error'); return; }
+
+    // Ensure 254 format if starting with 0
+    if (phoneNumber.startsWith('0')) phoneNumber = '254' + phoneNumber.slice(1);
 
     const btn = document.querySelector('[onclick="requestPairingCode()"]');
     if (btn) { btn.disabled = true; btn.textContent = 'Requesting...'; }
@@ -360,7 +363,7 @@ window.requestPairingCode = async function () {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
                 action: 'pair_phone', 
-                businessId: window.currentBusinessId || getBusinessId(), 
+                businessId: getBusinessId(), 
                 phoneNumber: phoneNumber 
             })
         });
@@ -368,17 +371,22 @@ window.requestPairingCode = async function () {
         const data = await response.json();
         if (data.error) throw new Error(data.error);
 
-        // Display the 8-character code to the user
         const container = document.getElementById('wa-mobile-container');
         container.innerHTML = `
             <p class="text-[10px] font-bold text-[#0F172A] uppercase tracking-wider mb-3">Your Pairing Code</p>
-            <div class="text-3xl font-black text-[#0F172A] tracking-[0.2em] text-center py-4 bg-slate-50 rounded-xl border border-slate-200 mb-4">
-                ${data.code}
+            <div id="wa-pairing-code" class="text-3xl font-black text-[#0F172A] tracking-[0.3em] text-center py-4 bg-slate-50 rounded-xl border border-slate-200 mb-4 font-mono">
+                ${data.pairing_code}
             </div>
-            <p class="text-xs text-slate-500 text-left">1. Open WhatsApp > Linked Devices<br>2. Tap Link with Phone Number<br>3. Enter this code.</p>
+            <ol class="list-decimal list-inside text-[11px] text-slate-600 space-y-2 font-medium">
+                <li>Open <b>WhatsApp</b> on your phone</li>
+                <li>Tap <b>Linked Devices > Link a Device</b></li>
+                <li>Select <b>Link with phone number instead</b></li>
+                <li>Enter the code shown above</li>
+            </ol>
+            <button onclick="verifyAndProceed()" class="w-full mt-4 py-3 bg-[#28A745] text-white font-black rounded-xl shadow-lg">I've Entered the Code</button>
         `;
         
-        startBackgroundStatusPolling(); // Start watching for the "Success" in the DB
+        startBackgroundStatusPolling(); // Start watching the DB for the 'connected' flip
 
     } catch (err) {
         showToast(err.message, 'error');
