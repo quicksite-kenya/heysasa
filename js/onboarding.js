@@ -375,6 +375,182 @@ window.requestPairingCode = async function () {
         await advanceStep(4);
     };
 
+    // ─── Dynamic Pricing Helper ─────────────────────────────────────────────────
+    window.getLeadPrice = function() {
+        // Draw from the database/onboarding data if available, fallback to 0.75
+        const dynamicPrice = window.onboardingData?.lead_price_kes; 
+        return (typeof dynamicPrice === 'number' && dynamicPrice > 0) ? dynamicPrice : 0.75;
+    };
+
+    window.updateLeadSlider = function(val) {
+        const count = parseInt(val, 10);
+        document.getElementById('leads-selected-display').textContent = count;
+        
+        // Calculate cost using the dynamic price
+        const pricePerLead = window.getLeadPrice();
+        const cost = (count * pricePerLead).toFixed(2);
+        
+        document.getElementById('leads-cost-display').textContent = cost;
+        
+        // Disable button if 0
+        const btn = document.getElementById('activate-leads-btn');
+        if (btn) {
+            btn.disabled = count === 0;
+        }
+    };
+
+    window.activateSelectedLeads = async function() {
+        const slider = document.getElementById('leads-slider');
+        const count = parseInt(slider.value, 10);
+        
+        if (count < 1) return;
+
+        const btn = document.getElementById('activate-leads-btn');
+        btn.disabled = true;
+        btn.textContent = 'Activating...';
+        showToast(`Activating ${count} leads...`);
+
+        try {
+            const businessId = getBusinessId();
+            const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-ochestrator', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    action: 'activate_leads', 
+                    businessId: businessId,
+                    count: count 
+                })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                if (response.status === 402 || data.error === 'insufficient_funds') {
+                    throw new Error(`Insufficient funds. You need KES ${data.required_kes?.toFixed(2) || 'more credits'}.`);
+                }
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
+
+            showToast(`Successfully activated ${count} leads!`, 'success');
+            Object.assign(window.onboardingData, { leads_processed: count });
+            await advanceStep(4);
+
+        } catch (err) {
+            console.error('[Onboarding] Lead activation failed:', err);
+            showToast(err.message || 'Failed to activate leads.', 'error');
+            btn.disabled = false;
+            btn.textContent = 'Activate';
+        }
+    };
+
+    window.skipLeads = async function() {
+        showToast('Skipping lead activation for now.');
+        Object.assign(window.onboardingData, { leads_processed: 0 });
+        await advanceStep(4);
+    };
+
+    // ─── Bot Build Background Polling ───────────────────────────────────────────
+    let _botPollTimer = null;
+    let _botDotsTimer = null;
+    let _fallbackMessageTimer = null;
+
+    window.startBotBuildPolling = function() {
+        if (_botPollTimer) return; // already polling
+        
+        const client = getSupabase();
+        const businessId = getBusinessId();
+        const banner = document.getElementById('bot-build-banner');
+        
+        if (!client || !businessId || !banner) return;
+
+        // 1. Animate the dots
+        let dots = 0;
+        _botDotsTimer = setInterval(() => {
+            const el = document.getElementById('bot-loading-dots');
+            if (el) {
+                dots = (dots + 1) % 4;
+                el.textContent = '.'.repeat(dots);
+            }
+        }, 500);
+
+        // 2. Slow fallback messages in case worker is silent
+        const fallbackMessages = [
+            "Gathering historical data...",
+            "Analysing your business profile...",
+            "Getting the tone right...",
+            "Training your model...",
+            "Configuring swarm agents..."
+        ];
+        let msgIdx = 0;
+        _fallbackMessageTimer = setInterval(() => {
+            const msgEl = document.getElementById('bot-build-message');
+            // Only use fallback if we haven't received a fresh specific message from the worker recently
+            if (msgEl && !msgEl.dataset.workerOverridden) {
+                msgEl.textContent = fallbackMessages[msgIdx];
+                msgIdx = (msgIdx + 1) % fallbackMessages.length;
+            }
+        }, 8000); // 8 seconds per message (nice and slow)
+
+        // 3. Poll Supabase for actual status
+        _botPollTimer = setInterval(async () => {
+            try {
+                // Check both onboarding status and main business persona status
+                const [onboardingRes, businessRes] = await Promise.all([
+                    client.from('business_onboarding').select('sync_status').eq('business_id', businessId).single(),
+                    client.from('businesses').select('persona_pack_status').eq('business_id', businessId).single()
+                ]);
+
+                const syncStatus = onboardingRes.data?.sync_status;
+                const personaStatus = businessRes.data?.persona_pack_status;
+
+                // Update text if worker provides a message
+                const msgEl = document.getElementById('bot-build-message');
+                if (syncStatus?.message && msgEl && msgEl.textContent !== syncStatus.message) {
+                    msgEl.textContent = syncStatus.message;
+                    msgEl.dataset.workerOverridden = "true"; 
+                }
+
+                // Check for completion
+                if (personaStatus === 'ready') {
+                    clearInterval(_botPollTimer);
+                    clearInterval(_botDotsTimer);
+                    clearInterval(_fallbackMessageTimer);
+
+                    // Update UI to success state
+                    const titleEl = document.getElementById('bot-build-title');
+                    const emojiEl = document.getElementById('bot-build-emoji');
+                    const actionBtn = document.getElementById('bot-build-action');
+
+                    if (titleEl) titleEl.innerHTML = "Bot Build Completed Successfully!";
+                    if (msgEl) msgEl.textContent = "Your AI is fully trained and ready to handle leads.";
+                    if (emojiEl) {
+                        emojiEl.classList.remove('animate-pulse');
+                        emojiEl.textContent = "✅";
+                    }
+                    if (actionBtn) actionBtn.classList.remove('hidden');
+                }
+                
+                // Handle failure/insufficient funds state
+                if (personaStatus === 'insufficient_funds' || personaStatus === 'failed') {
+                    clearInterval(_botPollTimer);
+                    clearInterval(_botDotsTimer);
+                    clearInterval(_fallbackMessageTimer);
+                    
+                    const titleEl = document.getElementById('bot-build-title');
+                    if (titleEl) {
+                        titleEl.innerHTML = "Bot Build Paused";
+                        titleEl.classList.replace('text-[#28A745]', 'text-red-500');
+                    }
+                    if (msgEl) msgEl.textContent = personaStatus === 'insufficient_funds' ? 'Insufficient credits. Please top up to finish building.' : 'An error occurred. We will retry automatically.';
+                    banner.classList.replace('border-[#28A745]/30', 'border-red-500/30');
+                }
+
+            } catch (err) {
+                console.error('[BotPolling] Error checking status:', err);
+            }
+        }, 5000); // Poll every 5 seconds
+    };
+
     window.completeFollowUps = async function () {
         showToast('Saving follow-up preferences…');
         Object.assign(window.onboardingData, { followup_configured: true });
@@ -430,14 +606,22 @@ window.requestPairingCode = async function () {
             {
                 id: 3, isDone: (currentStep > 3),
                 title: 'Process All Leads',
-                desc:  'Load your existing leads and start working them.',
+                desc:  'Select how many historical leads to activate for your AI to follow up with.',
                 icon:  `<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>`,
                 action: `
-                    <div class="flex flex-col gap-2 w-full md:w-auto">
-                        <p class="text-xs font-bold text-slate-500 text-center">Sync all historical leads automatically?</p>
-                        <div class="flex gap-2">
-                            <button onclick="processLeads(true)"  class="flex-1 px-8 py-3 bg-[#0F172A] text-white font-bold rounded-xl hover:bg-slate-800 transition-all shadow-lg">Yes</button>
-                            <button onclick="processLeads(false)" class="flex-1 px-8 py-3 bg-slate-100 border border-slate-200 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-all">No</button>
+                    <div class="flex flex-col gap-3 w-full md:w-[300px]">
+                        <div class="flex justify-between items-center px-1">
+                            <span class="text-xs font-bold text-slate-500">Total Found: <span id="leads-found-count" class="text-[#0F172A] font-black">${d.leads_processed || 0}</span></span>
+                            <span class="text-xs font-bold text-[#28A745]">Cost: KES <span id="leads-cost-display">0.00</span></span>
+                        </div>
+                        <input type="range" id="leads-slider" min="0" max="${d.leads_processed || 100}" value="0" 
+                               oninput="updateLeadSlider(this.value)"
+                               class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-[#0F172A]">
+                        <p class="text-center text-sm font-bold text-slate-700 mt-1">Activate <span id="leads-selected-display" class="text-[#0F172A] font-black text-lg">0</span> Leads</p>
+                        
+                        <div class="flex gap-2 mt-2">
+                            <button id="activate-leads-btn" onclick="activateSelectedLeads()" class="flex-1 px-8 py-3 bg-[#0F172A] text-white font-bold rounded-xl hover:bg-slate-800 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed">Activate</button>
+                            <button onclick="skipLeads()" class="px-6 py-3 bg-slate-100 border border-slate-200 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-all">Skip</button>
                         </div>
                     </div>`,
             },
@@ -508,6 +692,25 @@ window.requestPairingCode = async function () {
 
         el.innerHTML = `
             <div class="flex flex-col w-full max-w-3xl mx-auto pb-10">
+                
+                <div id="bot-build-banner" class="${currentStep >= 4 ? 'flex' : 'hidden'} flex-col w-full mb-8 p-4 rounded-xl border border-[#28A745]/30 bg-slate-100/80 backdrop-blur-md shadow-sm transition-all duration-700">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <span id="bot-build-emoji" class="text-2xl animate-pulse">🤖</span>
+                            <div>
+                                <h4 id="bot-build-title" class="text-sm font-black text-[#28A745] uppercase tracking-wider">
+                                    Building your AI bot<span id="bot-loading-dots">...</span>
+                                </h4>
+                                <p id="bot-build-message" class="text-xs font-bold text-slate-500 mt-0.5">Organising data and preparing systems...</p>
+                            </div>
+                        </div>
+                        <div id="bot-build-action" class="hidden">
+                            <button onclick="window.switchPage('playground')" class="px-5 py-2.5 bg-[#28A745] text-white text-xs font-black rounded-xl shadow-lg shadow-[#28A745]/20 hover:bg-[#218838] hover:scale-105 transition-all">
+                                Try it Out! 🚀
+                            </button>
+                        </div>
+                    </div>
+                </div>
 
                 <div class="mb-6 text-center md:text-left">
                     <h1 class="text-3xl font-black text-[#0F172A] mb-2 tracking-tight">Let's Get You Set Up</h1>
@@ -577,6 +780,12 @@ window.requestPairingCode = async function () {
                     </button>
                 </div>
             </div>`;
+
+        // Kick off the bot status polling if we are past the lead activation step
+        if (currentStep >= 4) {
+            // Slight delay to ensure DOM is fully painted
+            setTimeout(() => window.startBotBuildPolling(), 100);
+        }
     }
 
     // ─── Expose render function ───────────────────────────────────────────────

@@ -3,16 +3,57 @@
 // =========================================================================
 
 /**
- * Universally retrieves the active 8-character business identifier.
- * Use this across any module to get the current business context.
- * @returns {string|null} The short business_id or null if not onboarded
+ * Universally retrieves the active business identifier.
+ * Standardized to 'business_id' to match login and onboarding logic.
  */
 window.getActiveBusinessId = () => {
-    const id = localStorage.getItem('sb_business_id');
+    const id = localStorage.getItem('business_id');
     if (!id) {
-        console.warn("[Context Warning] Active business_id requested but none found in storage.");
+        console.warn("[Context Warning] No business_id found in storage.");
     }
     return id;
+};
+
+/**
+ * SECURE VERIFICATION: Checks Supabase session and links the user to their business row.
+ * Handles the logic for Dashboard redirection.
+ */
+window.verifyBusinessLink = async () => {
+    const supabase = window.getSupabase ? window.getSupabase() : window.supabase;
+    
+    if (!supabase) {
+        console.error("[Verify] Supabase client not found.");
+        return { status: 'ERROR', message: 'Client not initialized' };
+    }
+
+    // 1. Check for an active Supabase Auth session
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    
+    if (authError || !user) {
+        return { status: 'NO_SESSION' };
+    }
+
+    // 2. Fetch the business record linked to this user's UID
+    // Note: This assumes your 'businesses' table has a 'user_id' column
+    const { data: business, error: dbError } = await supabase
+        .from('businesses')
+        .select('business_id')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+    if (dbError) {
+        console.error("[Verify] Database fetch error:", dbError.message);
+        return { status: 'ERROR', message: dbError.message };
+    }
+
+    // 3. Return results for the dashboard router
+    if (business && business.business_id) {
+        localStorage.setItem('business_id', business.business_id);
+        return { status: 'SUCCESS', id: business.business_id };
+    } else {
+        // User is logged in, but has no business row (needs onboarding)
+        return { status: 'NO_BUSINESS' };
+    }
 };
 
 // =========================================================================

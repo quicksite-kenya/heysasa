@@ -205,80 +205,57 @@ function _enforceAuthentication() {
     return true;
 }
 
-// ─── One-time onboarding status fetch ─────────────────────────────────────────
-// Returns true when onboarding status loaded, false when it should retry or cannot proceed.
 async function _loadOnboardingStatus() {
-    if (_onboardingFetched) {
-        console.log('[Nav] Onboarding status already fetched, skipping re-fetch.');
-        return true;
-    }
+    if (_onboardingFetched) return true;
 
     const businessId = localStorage.getItem('business_id');
     const client = window.getSupabase ? window.getSupabase() : null;
 
-    if (!businessId) {
-        console.warn('[Nav] No business_id found; cannot load onboarding status.');
-        return false;
-    }
-
-    if (!client) {
-        _onboardingRetryCount += 1;
-        console.warn('[Nav] Supabase client unavailable. Retry', _onboardingRetryCount, 'of', MAX_ONBOARDING_RETRIES, 'diagnostics:', window.supabaseInitDiagnostics);
-        if (_onboardingRetryCount <= MAX_ONBOARDING_RETRIES) {
-            await new Promise(resolve => setTimeout(resolve, 200));
-            return _loadOnboardingStatus();
-        }
-        console.error('[Nav] Supabase client unavailable after maximum retries.', window.supabaseInitDiagnostics);
-        return false;
-    }
-
-    _onboardingRetryCount = 0;
-
-    console.log('[Nav] Loading onboarding status for businessId:', businessId, 'with Supabase client.', {
-        diagnostics: window.supabaseInitDiagnostics,
-        hasOnboardingData: !!window.onboardingData,
-    });
+    if (!businessId || !client) return false;
 
     try {
-        var result = await client
+        const { data, error } = await client
             .from('business_onboarding')
             .select('*')
             .eq('business_id', businessId)
             .maybeSingle();
 
-        var data  = result.data;
-        var error = result.error;
+        if (error) {
+            // Check for Foreign Key error (Business doesn't exist)
+            if (error.code === '23503') {
+                console.error('[Nav] Critical Error: Business ID in storage does not exist in database.');
+                localStorage.clear(); // Clear invalid data
+                window.location.href = 'login.html';
+                return false;
+            }
+            throw error;
+        }
 
-        if (!data && !error) {
-            // New user — create a fresh row
-            console.log('[Nav] No onboarding row found for businessId:', businessId, 'creating fresh row.');
-            var insertResult = await client
+        if (data) {
+            window.onboardingData = data;
+            _onboardingFetched = true;
+            return true;
+        } else {
+            // Try to create the row, but catch errors
+            console.log('[Nav] Creating fresh onboarding row for:', businessId);
+            const { data: newRow, error: insertError } = await client
                 .from('business_onboarding')
                 .insert({ business_id: businessId, current_step: 1, onboarding_complete: false })
                 .select()
                 .single();
-            data = insertResult.data;
-            error = insertResult.error || error;
-        }
 
-        if (error) {
-            console.error('[Nav] Onboarding fetch returned error:', error, 'diagnostics:', window.supabaseInitDiagnostics);
-        }
-if (data) {
-            window.onboardingData = data;
+            if (insertError) {
+                console.error('[Nav] Failed to create onboarding row:', insertError.message);
+                _onboardingFetched = false; // Stop the loop
+                return false; 
+            }
+
+            window.onboardingData = newRow;
             _onboardingFetched = true;
-            console.log('[Nav] Onboarding loaded — step:', data.current_step,
-                        '| complete:', data.onboarding_complete,
-                        '| wa:', data.whatsapp_connected);
             return true;
         }
-
-        // FIXED: Set to false so the application will retry fetching if it fails
-        _onboardingFetched = false;
-        console.warn('[Nav] Onboarding fetch returned no data for businessId:', businessId, 'diagnostics:', window.supabaseInitDiagnostics);
-        return false;
     } catch (err) {
-        console.error('[Nav] Failed to load onboarding status:', err, 'diagnostics:', window.supabaseInitDiagnostics);
+        console.error('[Nav] General error loading status:', err);
         return false;
     }
 }

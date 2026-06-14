@@ -726,22 +726,23 @@ function renderWhatsApp() {
 
 // ─── Billing ──────────────────────────────────────────────────────────────────
 function renderBilling() {
+  // We use KES as the primary display here
   return `
     <div class="pref-page-header">
       <div class="pref-page-title">Billing & Usage</div>
-      <div class="pref-page-sub">Pay per lead advancement — value-based pricing</div>
+      <div class="pref-page-sub">Pay per lead advancement — top up your AI credits</div>
     </div>
 
     <div class="pref-glass-card" style="text-align:center; padding:40px 32px;">
       <div style="font-size:13px; color:#64748B; font-weight:700; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:8px;">Available Credit</div>
-      <div style="font-size:48px; font-weight:800; color:#0F172A; letter-spacing:-0.03em; line-height:1; margin-bottom:24px;">$${mockBalance.balance_usd.toFixed(2)}</div>
-      <button class="pref-btn-primary" style="padding:16px 40px; font-size:15px; border-radius:100px;">+ Add Funds</button>
+      <div id="display-balance" style="font-size:48px; font-weight:800; color:#0F172A; letter-spacing:-0.03em; line-height:1; margin-bottom:24px;">KES 0.00</div>
+      <button class="pref-btn-primary" style="padding:16px 40px; font-size:15px; border-radius:100px;" onclick="window.openAddFundsModal()">+ Add Funds</button>
     </div>
 
     <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:24px;">
       <div class="pref-glass-card" style="padding:24px;">
-        <div style="font-size:24px; font-weight:800; color:#0F172A;">$${mockBalance.spent_this_month.toFixed(2)}</div>
-        <div style="font-size:12px; font-weight:600; color:#64748B; text-transform:uppercase; letter-spacing:0.05em; margin-top:6px;">Spent this month</div>
+        <div style="font-size:24px; font-weight:800; color:#0F172A;">${mockBalance.spent_this_month.toFixed(2)}</div>
+        <div style="font-size:12px; font-weight:600; color:#64748B; text-transform:uppercase; letter-spacing:0.05em; margin-top:6px;">KES Spent This Month</div>
       </div>
       <div class="pref-glass-card" style="padding:24px;">
         <div style="font-size:24px; font-weight:800; color:#28A745;">${mockBalance.won_leads}</div>
@@ -750,7 +751,6 @@ function renderBilling() {
     </div>
   `;
 }
-
 // ─── Section Router ───────────────────────────────────────────────────────────
 function renderPrefContent() {
   switch (activePrefSection) {
@@ -1207,4 +1207,77 @@ if (typeof PAGE_CONFIG !== 'undefined') {
       }
     }
   };
+}
+// --- PAYMENT SYSTEM LOGIC ---
+
+window.openAddFundsModal = () => document.getElementById('add-funds-modal').classList.remove('hidden');
+window.closeAddFundsModal = () => document.getElementById('add-funds-modal').classList.add('hidden');
+
+window.submitAddFunds = async function() {
+    const amount = document.getElementById('funds-amount').value;
+    const phone = document.getElementById('funds-phone').value;
+    const btn = document.getElementById('btn-pay-now');
+    const status = document.getElementById('payment-status');
+
+    if (!phone || phone.length < 10) return alert("Please enter a valid M-Pesa number");
+
+    btn.disabled = true;
+    btn.innerHTML = `<span class="animate-pulse">Requesting...</span>`;
+    status.classList.remove('hidden');
+    status.innerHTML = "Sending M-Pesa STK Push...";
+    status.className = "p-3 rounded-xl text-xs font-medium bg-blue-50 text-blue-600 mb-4";
+
+    try {
+        // Trigger the Edge Function
+        const { data, error } = await window.supabase.functions.invoke('initiate-instasend-stk', {
+            body: { 
+                amount: amount, 
+                customer_phone: phone, 
+                business_id: window.currentBusinessId 
+            }
+        });
+
+        if (error) throw error;
+
+        status.innerHTML = "STK Sent! Check your phone and enter M-Pesa PIN.";
+        status.className = "p-3 rounded-xl text-xs font-medium bg-orange-50 text-orange-600 mb-4";
+        btn.innerHTML = "Waiting for PIN...";
+
+        // Auto-refresh balance after 20 seconds (M-Pesa processing time)
+        setTimeout(async () => {
+            await window.refreshBalance();
+            window.closeAddFundsModal();
+            showPrefToast("Balance Updated!");
+        }, 20000);
+
+    } catch (err) {
+        btn.disabled = false;
+        btn.innerHTML = "Try Again";
+        status.innerHTML = "Error: " + err.message;
+        status.className = "p-3 rounded-xl text-xs font-medium bg-red-50 text-red-600 mb-4";
+    }
+};
+
+window.refreshBalance = async function() {
+    const { data, error } = await window.supabase
+        .from('business_balances')
+        .select('balance_kes')
+        .eq('business_id', window.currentBusinessId)
+        .maybeSingle();
+    
+    const balEl = document.getElementById('display-balance');
+    if (balEl && data) {
+        balEl.innerHTML = `KES ${parseFloat(data.balance_kes).toLocaleString()}`;
+    }
+};
+function showPrefToast(msg) {
+    const toast = document.getElementById('success-toast');
+    const toastMsg = document.getElementById('toast-message');
+    if (toast && toastMsg) {
+        toastMsg.innerText = msg;
+        toast.classList.remove('translate-y-20', 'opacity-0');
+        setTimeout(() => {
+            toast.classList.add('translate-y-20', 'opacity-0');
+        }, 3000);
+    }
 }
