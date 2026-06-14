@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 const EVOLUTION_URL = "http://129.213.33.173:8080"
 const EVOLUTION_API_KEY = "mysupersecretapikey123"
@@ -11,102 +11,57 @@ const corsHeaders = {
 }
 
 serve(async (req: Request) => {
-  // 1. FIX CORS: Explicitly handle the browser preflight check
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { status: 200, headers: corsHeaders })
-  }
+  if (req.method === 'OPTIONS') return new Response('ok', { status: 200, headers: corsHeaders })
 
   try {
     const { action, businessId } = await req.json()
-    
-    if (!businessId) throw new Error("businessId is required")
-
-    // Initialize Supabase with Service Role to ensure we can update status
-    const supabase = createClient(
-      Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    )
-    
-    // Use a STABLE instance name (No random UUIDs)
+    const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
     const instanceName = `heysasa_${businessId}`
 
     if (action === 'create_instance') {
-      console.log(`Checking state for: ${instanceName}`)
-
-      // 2. CHECK CONNECTION STATE first
-      const stateRes = await fetch(`${EVOLUTION_URL}/instance/connectionState/${instanceName}`, {
+      // 1. Cleanup: If instance exists but isn't open, delete it
+      const checkRes = await fetch(`${EVOLUTION_URL}/instance/connectionState/${instanceName}`, {
         headers: { 'apikey': EVOLUTION_API_KEY }
       })
-      
-      if (stateRes.ok) {
-        const stateData = await stateRes.json()
-        
-        // If already connected, sync DB and tell frontend to move forward
-        if (stateData.instance?.state === 'open' || stateData.instance?.state === 'connected') {
-          console.log("Instance already connected. Syncing DB...")
-          
-          await Promise.all([
-             supabase.from('businesses').update({ whatsapp_connected: true, status: 'connected' }).eq('business_id', businessId),
-             supabase.from('business_onboarding').update({ whatsapp_connected: true }).eq('business_id', businessId)
-          ])
-
-          return new Response(JSON.stringify({ status: 'ALREADY_CONNECTED', instance_name: instanceName }), { 
-            status: 200, 
-            headers: { ...corsHeaders, "Content-Type": "application/json" } 
-          })
+      if (checkRes.ok) {
+        const state = await checkRes.json()
+        if (state.instance?.state === 'open') {
+          return new Response(JSON.stringify({ status: 'ALREADY_CONNECTED' }), { status: 200, headers: corsHeaders })
         }
-
-        // If instance exists but is NOT open, delete it so we can start fresh
-        console.log("Instance exists but disconnected. Re-creating...")
-        await fetch(`${EVOLUTION_URL}/instance/delete/${instanceName}`, { 
-          method: 'DELETE', 
-          headers: { 'apikey': EVOLUTION_API_KEY } 
-        })
+        await fetch(`${EVOLUTION_URL}/instance/delete/${instanceName}`, { method: 'DELETE', headers: { 'apikey': EVOLUTION_API_KEY } })
       }
 
-      // 3. CREATE FRESH INSTANCE
-      console.log("Creating new instance...")
-      const createRes = await fetch(`${EVOLUTION_URL}/instance/create`, {
+      // 2. Create Instance
+      await fetch(`${EVOLUTION_URL}/instance/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_API_KEY },
-        body: JSON.stringify({ 
-            name: instanceName, 
-            integration: "WHATSAPP-BAILEYS",
-            token: businessId // Using businessId as the instance token
-        })
+        body: JSON.stringify({ name: instanceName, integration: "WHATSAPP-BAILEYS" })
       })
 
-      if (!createRes.ok) {
-          const err = await createRes.json()
-          throw new Error(`Evolution Create Error: ${err.message || 'Unknown'}`)
+      // 3. Connect & QR Retry Loop (Try 5 times)
+      let qrCode = null;
+      for (let i = 0; i < 5; i++) {
+        console.log(`QR Fetch Attempt ${i + 1}...`);
+        const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
+          headers: { 'apikey': EVOLUTION_API_KEY }
+        })
+        const data = await connectRes.json()
+        
+        // Evolution API usually returns QR in 'base64' or 'code'
+        qrCode = data.base64 || data.code || (data.data?.qrcode);
+        
+        if (qrCode) break;
+        await new Promise(res => setTimeout(res, 2000)); // Wait 2 seconds before retrying
       }
 
-      // 4. FETCH QR CODE
-      console.log("Fetching QR...")
-      const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
-        method: 'GET',
-        headers: { 'apikey': EVOLUTION_API_KEY }
-      })
-      
-      const connectData = await connectRes.json()
+      if (!qrCode) throw new Error("Evolution API failed to generate QR code. Try again in a moment.");
 
-      return new Response(JSON.stringify({ 
-          qrcode: connectData.base64, 
-          instance_name: instanceName,
-          status: 'QR_READY' 
-      }), { 
-        status: 200,
+      return new Response(JSON.stringify({ qrcode: qrCode, status: 'QR_READY' }), { 
+        status: 200, 
         headers: { ...corsHeaders, "Content-Type": "application/json" } 
       })
     }
-
-    return new Response(JSON.stringify({ error: "Invalid Action" }), { status: 400, headers: corsHeaders })
-
-  } catch (error) {
-    console.error("Orchestrator Error:", error.message)
-    return new Response(JSON.stringify({ error: error.message }), { 
-      status: 200, // We return 200 even on error so CORS preflight doesn't trigger a secondary failure
-      headers: { ...corsHeaders, "Content-Type": "application/json" } 
-    })
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message }), { status: 200, headers: corsHeaders })
   }
 })
