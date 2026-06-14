@@ -350,7 +350,6 @@ window.requestPairingCode = async function () {
     const input = document.getElementById('wa-phone-input');
     const phoneNumber = input?.value?.trim();
     if (!phoneNumber) { showToast('Enter your phone number first', 'error'); return; }
-    if (!_instanceName) { showToast('Session expired. Please close and retry.', 'error'); return; }
 
     const btn = document.querySelector('[onclick="requestPairingCode()"]');
     if (btn) { btn.disabled = true; btn.textContent = 'Requesting...'; }
@@ -359,31 +358,30 @@ window.requestPairingCode = async function () {
         const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-orchestrator', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'pair_phone', instanceName: _instanceName, instanceToken: window._instanceToken, phoneNumber })
-
+            body: JSON.stringify({ 
+                action: 'pair_phone', 
+                businessId: window.currentBusinessId || getBusinessId(), 
+                phoneNumber: phoneNumber 
+            })
         });
 
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        if (data.error) throw new Error(data.error);
 
-        const code = data.pairing_code;
+        // Display the 8-character code to the user
         const container = document.getElementById('wa-mobile-container');
         container.innerHTML = `
             <p class="text-[10px] font-bold text-[#0F172A] uppercase tracking-wider mb-3">Your Pairing Code</p>
-            <div id="wa-pairing-code" 
-                 class="text-3xl font-black text-[#0F172A] tracking-[0.3em] text-center py-4 
-                        bg-slate-50 rounded-xl border border-slate-200 mb-4 font-mono">
-                ${code}
+            <div class="text-3xl font-black text-[#0F172A] tracking-[0.2em] text-center py-4 bg-slate-50 rounded-xl border border-slate-200 mb-4">
+                ${data.code}
             </div>
-            <ol class="list-decimal list-inside text-xs text-slate-600 space-y-1.5 font-medium leading-relaxed">
-                <li>Open <b>WhatsApp</b> on your phone</li>
-                <li>Tap <b>Linked Devices → Link with phone number</b></li>
-                <li>Enter the code above</li>
-            </ol>
+            <p class="text-xs text-slate-500 text-left">1. Open WhatsApp > Linked Devices<br>2. Tap Link with Phone Number<br>3. Enter this code.</p>
         `;
-        // Polling is already running from QR phase — no need to restart
+        
+        startBackgroundStatusPolling(); // Start watching for the "Success" in the DB
+
     } catch (err) {
-        showToast(err.message || 'Failed to get pairing code', 'error');
+        showToast(err.message, 'error');
         if (btn) { btn.disabled = false; btn.textContent = 'Get Code'; }
     }
 };
