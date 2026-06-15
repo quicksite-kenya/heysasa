@@ -191,74 +191,78 @@ let _instanceName   = null;
     };
 
     window.openWhatsAppModal = async function () {
-        if (_isConnectingWa) return; // Prevent double clicks
+        if (_isConnectingWa) return; 
         _isConnectingWa = true;
 
-        const modal   = document.getElementById('wa-modal');
-        const content = document.getElementById('wa-modal-content');
+        const modal = document.getElementById('wa-modal');
         const loadingZone = document.getElementById('wa-loading-zone');
         const authZone = document.getElementById('wa-auth-zone');
-        const qrImg   = document.getElementById('wa-qr-img');
+        const qrImg = document.getElementById('wa-qr-img');
 
-        if (!modal) return;
+        if (!modal || !qrImg) return;
 
-        // Reset UI state cleanly
+        // Reset UI
         authZone.classList.add('hidden');
         loadingZone.classList.remove('hidden');
-        loadingZone.innerHTML = `
-            <div class="w-8 h-8 border-4 border-slate-200 border-t-[#28A745] rounded-full animate-spin mx-auto mb-3"></div>
-            <p id="wa-loader-text" class="text-sm font-bold text-slate-500 animate-pulse">Initializing...</p>
-        `;
-
         modal.classList.remove('opacity-0', 'pointer-events-none');
         modal.classList.add('opacity-100', 'pointer-events-auto');
-        setTimeout(() => {
-            content?.classList.remove('scale-95', 'translate-y-4', 'opacity-0');
-            content?.classList.add('scale-100', 'translate-y-0', 'opacity-100');
-        }, 10);
-
-        startProgressPhrasesLoop();
 
         try {
             const businessId = getBusinessId();
-            const websiteUrl = window.onboardingData?.website_url || "";
-            const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-ochestrator', {
+            const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-orchestrator', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'create_instance', businessId, websiteUrl })
+                body: JSON.stringify({ action: 'create_instance', businessId })
             });
-
-            if (!response.ok) {
-                const errData = await response.json().catch(() => ({}));
-                throw new Error(errData.error || `HTTP ${response.status}`);
-            }
 
             const data = await response.json();
 
-           if (data?.qrcode) {
-    _instanceName = data.instance_name;
-    window._instanceToken = data.instance_token;  // ← add this
-    loadingZone.classList.add('hidden');
-    authZone.classList.remove('hidden');
-    const qr = data.qrcode;
-    qrImg.src = qr.startsWith('data:') ? qr : `data:image/png;base64,${qr}`;
-    startBackgroundStatusPolling();
+            if (data.error) throw new Error(data.error);
+
+            if (data.status === 'ALREADY_CONNECTED' || data.status === 'CONNECTED') {
+                showToast("WhatsApp already linked!", "success");
+                window.closeWhatsAppModal();
+                await advanceStep(3);
+                return;
+            }
+
+            // --- THE FIX: DEFENSIVE DATA URI PARSING ---
+            if (data && data.qrcode) {
+                let rawQr = data.qrcode;
+
+                // 1. If qrcode is an object instead of a string, try to find the string inside it
+                if (typeof rawQr === 'object') {
+                    rawQr = rawQr.base64 || rawQr.code || rawQr.qrcode || "";
+                }
+
+                // 2. Remove any accidentally included quotes or whitespace
+                rawQr = String(rawQr).trim().replace(/["']/g, "");
+
+                if (!rawQr || rawQr === "undefined" || rawQr === "[object Object]") {
+                    throw new Error("Invalid QR data format received from server.");
+                }
+
+                // 3. Ensure the Data URI prefix is exactly correct (preventing ERR_INVALID_URL)
+                if (rawQr.startsWith('data:image')) {
+                    qrImg.src = rawQr;
+                } else {
+                    // Prepend the prefix if it's a raw base64 string
+                    qrImg.src = `data:image/png;base64,${rawQr}`;
+                }
+
+                loadingZone.classList.add('hidden');
+                authZone.classList.remove('hidden');
+                startBackgroundStatusPolling();
             } else {
-                throw new Error("No QR code returned from server.");
+                throw new Error("No QR code was generated. Please retry.");
             }
         } catch (err) {
             console.error('[Onboarding] Orchestrator error:', err);
-            if (_progressTextInterval) clearInterval(_progressTextInterval);
-            
-            // Unlock so they can try again
-            _isConnectingWa = false; 
-
-            // Clearly break the loading UI and show the exact error
+            _isConnectingWa = false;
             loadingZone.innerHTML = `
-                <div class="p-4 bg-red-50 rounded-xl border border-red-100">
-                    <svg class="w-8 h-8 text-red-500 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    <p class="text-xs font-bold text-red-700 mb-2">Connection Failed</p>
-                    <p class="text-xs text-red-600 font-medium">${err.message}</p>
+                <div class="p-4 bg-red-50 rounded-xl text-center">
+                    <p class="text-red-600 text-xs font-bold mb-2">${err.message}</p>
+                    <button onclick="_isConnectingWa=false; openWhatsAppModal()" class="text-[10px] bg-red-600 text-white px-3 py-1 rounded-lg uppercase">Retry</button>
                 </div>
             `;
         }
