@@ -8,19 +8,24 @@ const corsHeaders = {
 }
 
 serve(async (req: Request) => {
-  // 1. HANDLE PREFLIGHT (The fix for your error)
+  // 1. HANDLE PREFLIGHT IMMEDIATELY
+  // This is the specific fix for "It does not have HTTP ok status"
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders, status: 200 })
   }
 
   try {
     const { action, businessId } = await req.json()
+    
     const evoUrl = Deno.env.get('EVOLUTION_API_URL')
     const evoKey = Deno.env.get('EVOLUTION_API_KEY')
 
-    // Defensive check for secrets
+    // 2. DEFENSIVE CHECK: If secrets are missing, don't let the function crash
     if (!evoUrl || !evoUrl.startsWith('http')) {
-      throw new Error(`Invalid EVOLUTION_API_URL: "${evoUrl}"`)
+      return new Response(JSON.stringify({ error: "Backend Secret Config Error: EVOLUTION_API_URL is missing" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 200 // We return 200 so the browser shows the error message instead of a CORS block
+      })
     }
 
     const instanceName = `heysasa_${businessId}`
@@ -43,7 +48,7 @@ serve(async (req: Request) => {
     })
 
   } catch (error) {
-    // Return 200 even on error so the browser lets you read the JSON message
+    console.error("[CATCH BLOCK]:", error.message)
     return new Response(JSON.stringify({ error: error.message }), { 
       headers: { ...corsHeaders, "Content-Type": "application/json" },
       status: 200 
