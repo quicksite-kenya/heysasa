@@ -207,68 +207,47 @@ let _instanceName   = null;
         modal.classList.remove('opacity-0', 'pointer-events-none');
         modal.classList.add('opacity-100', 'pointer-events-auto');
 
-        try {
-            const businessId = getBusinessId();
-            const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-orchestrator
-', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'create_instance', businessId })
-            });
+        // ... inside openWhatsAppModal ...
+try {
+    const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-orchestrator', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create_instance', businessId: getBusinessId() })
+    });
 
-            const data = await response.json();
+    // CHECK 1: Did the server return a 200?
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Server Error: ${errorText || response.statusText}`);
+    }
 
-            if (data.error) throw new Error(data.error);
+    // CHECK 2: Try to parse JSON safely
+    const text = await response.text();
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch (e) {
+        console.error("Malformed JSON response:", text);
+        throw new Error("The server sent an invalid response format.");
+    }
 
-            if (data.status === 'ALREADY_CONNECTED' || data.status === 'CONNECTED') {
-                showToast("WhatsApp already linked!", "success");
-                window.closeWhatsAppModal();
-                await advanceStep(3);
-                return;
-            }
+    // CHECK 3: Check our custom success flag
+    if (data.success === false || data.error) {
+        throw new Error(data.error || "Unknown backend error");
+    }
 
-            // --- THE FIX: DEFENSIVE DATA URI PARSING ---
-            if (data && data.qrcode) {
-                let rawQr = data.qrcode;
+    // Now proceed with data.qrcode or data.status
+    if (data.data?.instance?.state === 'open') {
+        showToast("Connected!");
+        await advanceStep(3);
+    } else {
+        // Show QR code logic...
+    }
 
-                // 1. If qrcode is an object instead of a string, try to find the string inside it
-                if (typeof rawQr === 'object') {
-                    rawQr = rawQr.base64 || rawQr.code || rawQr.qrcode || "";
-                }
-
-                // 2. Remove any accidentally included quotes or whitespace
-                rawQr = String(rawQr).trim().replace(/["']/g, "");
-
-                if (!rawQr || rawQr === "undefined" || rawQr === "[object Object]") {
-                    throw new Error("Invalid QR data format received from server.");
-                }
-
-                // 3. Ensure the Data URI prefix is exactly correct (preventing ERR_INVALID_URL)
-                if (rawQr.startsWith('data:image')) {
-                    qrImg.src = rawQr;
-                } else {
-                    // Prepend the prefix if it's a raw base64 string
-                    qrImg.src = `data:image/png;base64,${rawQr}`;
-                }
-
-                loadingZone.classList.add('hidden');
-                authZone.classList.remove('hidden');
-                startBackgroundStatusPolling();
-            } else {
-                throw new Error("No QR code was generated. Please retry.");
-            }
-        } catch (err) {
-            console.error('[Onboarding] Orchestrator error:', err);
-            _isConnectingWa = false;
-            loadingZone.innerHTML = `
-                <div class="p-4 bg-red-50 rounded-xl text-center">
-                    <p class="text-red-600 text-xs font-bold mb-2">${err.message}</p>
-                    <button onclick="_isConnectingWa=false; openWhatsAppModal()" class="text-[10px] bg-red-600 text-white px-3 py-1 rounded-lg uppercase">Retry</button>
-                </div>
-            `;
-        }
-    };
-
+} catch (err) {
+    console.error('[Onboarding] Logic Error:', err);
+    showToast(err.message, 'error');
+}
     window.closeWhatsAppModal = function () {
     _isConnectingWa = false;
     _instanceName   = null;

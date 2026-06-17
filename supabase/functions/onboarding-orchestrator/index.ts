@@ -8,50 +8,57 @@ const corsHeaders = {
 }
 
 serve(async (req: Request) => {
-  // 1. HANDLE PREFLIGHT IMMEDIATELY
-  // This is the specific fix for "It does not have HTTP ok status"
+  // 1. Standardize OPTIONS response (No body, Status 204)
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders, status: 200 })
+    return new Response(null, { headers: corsHeaders, status: 204 })
   }
 
   try {
     const { action, businessId } = await req.json()
-    
     const evoUrl = Deno.env.get('EVOLUTION_API_URL')
     const evoKey = Deno.env.get('EVOLUTION_API_KEY')
 
-    // 2. DEFENSIVE CHECK: If secrets are missing, don't let the function crash
-    if (!evoUrl || !evoUrl.startsWith('http')) {
-      return new Response(JSON.stringify({ error: "Backend Secret Config Error: EVOLUTION_API_URL is missing" }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 200 // We return 200 so the browser shows the error message instead of a CORS block
-      })
-    }
+    if (!evoUrl) throw new Error("Missing EVOLUTION_API_URL secret")
+    if (!businessId) throw new Error("businessId is required")
 
     const instanceName = `heysasa_${businessId}`
 
     if (action === 'create_instance') {
+      // Fetch connection state
       const response = await fetch(`${evoUrl}/instance/connectionState/${instanceName}`, {
-        headers: { 'apikey': evoKey! }
+        headers: { 'apikey': evoKey || "" }
       })
-      const result = await response.json()
+      
+      // Defensively handle Evolution API responses
+      const resultText = await response.text()
+      let resultData;
+      try {
+        resultData = JSON.parse(resultText)
+      } catch (e) {
+        resultData = { status: resultText } // Fallback if Evolution returns plain text
+      }
 
-      return new Response(JSON.stringify(result), { 
+      // 2. ALWAYS return a structured JSON object
+      return new Response(JSON.stringify({ 
+        success: true, 
+        data: resultData,
+        instance_name: instanceName 
+      }), { 
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 200 
       })
     }
 
-    return new Response(JSON.stringify({ error: "Action not recognized" }), { 
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 200 
-    })
+    throw new Error(`Unknown action: ${action}`)
 
   } catch (error) {
-    console.error("[CATCH BLOCK]:", error.message)
-    return new Response(JSON.stringify({ error: error.message }), { 
+    // 3. Ensure ERRORS are also valid JSON
+    return new Response(JSON.stringify({ 
+      success: false, 
+      error: error.message 
+    }), { 
       headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 200 
+      status: 200 // Returning 200 prevents CORS blocks on error messages
     })
   }
 })
