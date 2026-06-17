@@ -1,7 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-// 1. Define headers clearly
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -9,52 +7,51 @@ const corsHeaders = {
 }
 
 serve(async (req: Request) => {
-  // 2. THE ABSOLUTE FIX: Handle the preflight OPTIONS request immediately
-  // This MUST happen before any logic or body parsing.
+  // 1. PERMANENT FIX PART 1: The Preflight must be independent
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders, status: 200 })
   }
 
   try {
-    // Check if body exists before parsing
-    const body = await req.json().catch(() => ({}))
-    const { action, businessId } = body
-
-    // 3. Secrets Guard - Prevent crash if URL is missing
+    // Get secrets safely
     const evoUrl = Deno.env.get('EVOLUTION_API_URL')
     const evoKey = Deno.env.get('EVOLUTION_API_KEY')
 
-    if (!evoUrl || !evoUrl.startsWith('http')) {
-      throw new Error(`EVOLUTION_API_URL is wrong. Current value: "${evoUrl}"`)
-    }
+    const body = await req.json().catch(() => ({}))
+    const { action, businessId } = body
 
-    const instanceName = `heysasa_${businessId}`
+    // 2. PERMANENT FIX PART 2: Defend against internal fetch crashes
+    // If your Evolution server is slow or IP is wrong, a normal fetch crashes 
+    // the whole function. We must wrap the fetch.
+    
+    let resultData = {}
 
     if (action === 'create_instance') {
-      // Standard Evolution Go status check
+      const instanceName = `heysasa_${businessId}`
+      
       const response = await fetch(`${evoUrl}/instance/connectionState/${instanceName}`, {
         headers: { 'apikey': evoKey || '' }
+      }).catch((e) => {
+        // This catches "Server Not Found" so the function doesn't die
+        throw new Error(`Evolution Server Unreachable: ${e.message}`)
       })
-      
-      const result = await response.json()
 
-      return new Response(JSON.stringify(result), { 
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 200 
-      })
+      resultData = await response.json()
     }
 
-    return new Response(JSON.stringify({ error: "Action not supported" }), { 
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 200 
+    // 3. SUCCESS EXIT: Always send headers
+    return new Response(JSON.stringify(resultData), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 200,
     })
 
   } catch (error) {
-    // 4. Return error as JSON so Dashboard can show it
-    console.error("[Backend Error]:", error.message)
-    return new Response(JSON.stringify({ error: error.message }), { 
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 200 // Returning 200 here ensures the browser doesn't trigger a CORS block on the error
+    // 4. ERROR EXIT: The most important part. 
+    // If the function errors, we STILL return 200 so the browser 
+    // allows the error message to be read by your JavaScript.
+    return new Response(JSON.stringify({ error: error.message, isError: true }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 200, 
     })
   }
 })
