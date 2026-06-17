@@ -32,26 +32,32 @@
         if (!client || !businessId) return null;
 
         try {
-            const [profileRes, metricsRes, activityRes] = await Promise.all([
+            // Updated to fetch from the new business_balances table
+            const [profileRes, metricsRes, activityRes, balanceRes] = await Promise.all([
                 client.from('businesses')
-                      .select('name, phone, email, plan, credits_balance, created_at')
-                      .eq('id', businessId)
+                      .select('name, phone, owner_email, business_type, created_at')
+                      .eq('business_id', businessId)
                       .single(),
                 client.from('business_metrics')
                       .select('total_leads, active_conversations, messages_sent, revenue_attributed, conversion_rate')
                       .eq('business_id', businessId)
-                      .single(),
+                      .maybeSingle(),
                 client.from('conversation_events')
                       .select('event_type, created_at, lead_name, summary')
                       .eq('business_id', businessId)
                       .order('created_at', { ascending: false })
                       .limit(6),
+                client.from('business_balances')
+                      .select('balance_kes')
+                      .eq('business_id', businessId)
+                      .maybeSingle()
             ]);
 
             return {
                 profile:  profileRes.data  || null,
                 metrics:  metricsRes.data  || null,
                 activity: activityRes.data || [],
+                balance:  balanceRes.data  || { balance_kes: 0 }
             };
         } catch (err) {
             console.error('[Dashboard] Data fetch error:', err);
@@ -61,10 +67,10 @@
 
     // ─── Formatting helpers ────────────────────────────────────────────────────
     function fmt(n, prefix = '') {
-        if (n == null) return '—';
+        if (n == null) return '0';
         if (n >= 1_000_000) return `${prefix}${(n / 1_000_000).toFixed(1)}M`;
         if (n >= 1_000)     return `${prefix}${(n / 1_000).toFixed(1)}K`;
-        return `${prefix}${n.toLocaleString()}`;
+        return `${prefix}${parseFloat(n).toLocaleString()}`;
     }
 
     function timeAgo(isoString) {
@@ -105,10 +111,11 @@
         const p = data?.profile  || {};
         const m = data?.metrics  || {};
         const a = data?.activity || [];
+        const b = data?.balance  || { balance_kes: 0 };
 
         const plan   = p.plan    || 'Starter';
         const name   = p.name    || 'Your Business';
-        const bal    = p.credits_balance != null ? `KES ${p.credits_balance.toLocaleString()}` : '—';
+        const bal    = b.balance_kes != null ? `KES ${parseFloat(b.balance_kes).toLocaleString()}` : 'KES 0.00';
         const joined = p.created_at ? new Date(p.created_at).toLocaleDateString('en-KE', { month: 'long', year: 'numeric' }) : '';
 
         const statCards = [
@@ -172,8 +179,8 @@
                         </div>
                     </div>
                     <div style="display:flex;gap:12px;flex-wrap:wrap;">
-                        <div style="background:#1E293B;border-radius:12px;padding:12px 18px;text-align:center;">
-                            <div style="font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:.05em;">Balance</div>
+                        <div style="background:#1E293B;border-radius:12px;padding:12px 18px;text-align:center;cursor:pointer;" onclick="window.switchPage('preferences')">
+                            <div style="font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:.05em;">AI Tokens</div>
                             <div style="font-size:18px;font-weight:800;color:#34D399;margin-top:2px;">${bal}</div>
                         </div>
                         <div style="background:#1E293B;border-radius:12px;padding:12px 18px;text-align:center;">
@@ -215,8 +222,8 @@
                         ${[
                             { label: 'View Analytics',   page: 'analytics',   icon: '#3B82F6', bg: '#EFF6FF' },
                             { label: 'Manage Leads',     page: 'leads',       icon: '#22C55E', bg: '#F0FDF4' },
-                            { label: 'Products',         page: 'products',    icon: '#F59E0B', bg: '#FFFBEB' },
-                            { label: 'Preferences',      page: 'preferences', icon: '#8B5CF6', bg: '#F5F3FF' },
+                            { label: 'Add Stock (AI)',   page: 'products',    icon: '#F59E0B', bg: '#FFFBEB' },
+                            { label: 'AI Preferences',   page: 'preferences', icon: '#8B5CF6', bg: '#F5F3FF' },
                         ].map(q => `
                             <button onclick="window.switchPage('${q.page}')"
                                     style="background:#fff;border:1px solid #E2E8F0;border-radius:14px;
@@ -245,13 +252,6 @@
     }
 
     // ─── Registration ──────────────────────────────────────────────────────────
-    //
-    // Only register if onboarding is complete.
-    // We check window.onboardingData (set by nav.js's _loadOnboardingStatus).
-    // If it's not loaded yet (script tag order issue), we defer registration
-    // until DOMContentLoaded when onboardingData should be available.
-    // ─── Expose render function ───────────────────────────────────────────────
-    // overviewRouter.js will call this when onboarding is complete
     window._renderDashboard = async function (businessId) {
         const activeId = businessId || getBusinessId();
         await _render(activeId);
