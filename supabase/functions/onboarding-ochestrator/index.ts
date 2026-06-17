@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-// 1. DEFINE HEADERS TO ALLOW GITHUB PAGES
+// 1. Definitively allow GitHub Pages to talk to Supabase
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -9,8 +9,8 @@ const corsHeaders = {
 }
 
 serve(async (req: Request) => {
-  // 2. CRITICAL: Handle the "Preflight" OPTIONS request
-  // This solves the "doesn't pass access control check" error
+  // 2. IMMEDIATE HANDSHAKE (Preflight)
+  // This solves "It does not have HTTP ok status"
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders, status: 200 })
   }
@@ -18,13 +18,14 @@ serve(async (req: Request) => {
   try {
     const { action, businessId } = await req.json()
     
-    // Check for secrets immediately
+    // Retrieve secrets
     const evoUrl = Deno.env.get('EVOLUTION_API_URL')
     const evoKey = Deno.env.get('EVOLUTION_API_KEY')
 
+    // 3. SECRETS GUARD: Stop the crash before it happens
+    // If the URL is currently a "long string of letters," this will catch it
     if (!evoUrl || !evoUrl.startsWith('http')) {
-      throw new Error(`EVOLUTION_API_URL is wrong. It is currently: "${evoUrl}". It must be the IP address starting with http://`)
-      console.log("Current URL being used:", Deno.env.get('EVOLUTION_API_URL'))
+      throw new Error(`CRITICAL: EVOLUTION_API_URL is missing or invalid. It is currently: "${evoUrl}"`)
     }
 
     const supabase = createClient(
@@ -35,26 +36,26 @@ serve(async (req: Request) => {
     const instanceName = `heysasa_${businessId}`
 
     if (action === 'create_instance') {
-      // (Your QR/Creation Logic Here...)
-      // Example success response:
-      return new Response(JSON.stringify({ status: 'SUCCESS', qrcode: '...' }), { 
+      // Your Evolution API logic...
+      // (Ensure every 'return new Response' uses the corsHeaders)
+      return new Response(JSON.stringify({ status: 'READY', qrcode: '...' }), { 
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 200 
       })
     }
 
-    return new Response(JSON.stringify({ error: "Action not recognized" }), { 
+    return new Response(JSON.stringify({ error: "Invalid action" }), { 
       headers: { ...corsHeaders, "Content-Type": "application/json" },
       status: 200 
     })
 
   } catch (error) {
-    // 3. RETURN ERRORS WITH CORS HEADERS
-    // If you don't return corsHeaders in the catch block, a crash looks like a CORS error
+    // 4. CRITICAL: Catch blocks MUST return status 200 and corsHeaders
+    // If you return status 400 or 500 here, the browser hides the error and shows "CORS Error"
     console.error("[BACKEND ERROR]:", error.message)
     return new Response(JSON.stringify({ error: error.message }), { 
       headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 200 // Return 200 so the browser doesn't block the error text
+      status: 200 
     })
   }
 })
