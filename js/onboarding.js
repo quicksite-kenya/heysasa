@@ -65,7 +65,8 @@
             // Update in-memory state
             Object.assign(window.onboardingData, fields);
 
-            // Hand off: re-render overview
+            // Hand off: re-render overview — overviewRouter.js will now
+            // delegate to the dashboard render function since onboarding_complete is true
             window.switchPage('overview');
             return;
         }
@@ -215,6 +216,7 @@ let _instanceName   = null;
             const businessId = getBusinessId();
             const websiteUrl = window.onboardingData?.website_url || "";
             
+            // FIX: Corrected spelling to 'onboarding-orchestrator'
             const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-orchestrator', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -231,6 +233,7 @@ let _instanceName   = null;
 
             if (data.error) throw new Error(data.error);
 
+            // Handle detection of existing valid connection
             const isAlreadyOpen = data.status === 'ALREADY_CONNECTED' || 
                                  data.status === 'CONNECTED' || 
                                  (data.data?.instance?.state === 'open');
@@ -242,10 +245,17 @@ let _instanceName   = null;
                 return;
             }
 
-            // --- THE FIX: CATCH CASE-SENSITIVE OR NESTED QR KEYS ---
-            const rawQr = data.qrcode || data.data?.qrcode || data.data?.Qrcode || data.data?.base64 || data.base64;
+            // --- THE FIX: CATCH EVERY POSSIBLE QR KEY ---
+            const rawQr = data.qrcode || 
+                          data.data?.qrcode || 
+                          data.data?.Qrcode || 
+                          data.data?.base64 || 
+                          data.base64 || 
+                          data.code || 
+                          (data.data && data.data.qr);
 
             if (rawQr) {
+                // Ensure the string is clean and has the proper prefix
                 let cleanQr = String(rawQr).trim().replace(/["']/g, "");
                 qrImg.src = cleanQr.startsWith('data:image') ? cleanQr : `data:image/png;base64,${cleanQr}`;
                 
@@ -253,7 +263,9 @@ let _instanceName   = null;
                 authZone.classList.remove('hidden');
                 startBackgroundStatusPolling();
             } else {
-                throw new Error("No QR code was generated. Please try again in 10 seconds.");
+                // If we get here, log the whole object to help debug
+                console.error("Missing QR in response:", data);
+                throw new Error("No QR code was generated. Please wait 10 seconds and try again.");
             }
         } catch (err) {
             console.error('[Onboarding] Orchestrator error:', err);
@@ -482,7 +494,7 @@ window.requestPairingCode = async function () {
             }
         }, 500);
 
-        const fallbackMessages = ["Gathering historical data...", "Analysing profile...", "Getting the tone right...", "Training model...", "Configuring agents..."];
+        const fallbackMessages = ["Gathering historical data...", "Analysing profile...", "Getting the tone right...", "Training your model...", "Configuring swarm agents..."];
         let msgIdx = 0;
         _fallbackMessageTimer = setInterval(() => {
             const msgEl = document.getElementById('bot-build-message');
@@ -494,12 +506,12 @@ window.requestPairingCode = async function () {
 
         _botPollTimer = setInterval(async () => {
             try {
-                const [onboardingRes, businessRes] = await Promise.all([
+                const [onRes, businessRes] = await Promise.all([
                     client.from('business_onboarding').select('sync_status').eq('business_id', businessId).single(),
                     client.from('businesses').select('persona_pack_status').eq('business_id', businessId).single()
                 ]);
 
-                const syncStatus = onboardingRes.data?.sync_status;
+                const syncStatus = onRes.data?.sync_status;
                 const personaStatus = businessRes.data?.persona_pack_status;
 
                 const msgEl = document.getElementById('bot-build-message');
@@ -512,18 +524,20 @@ window.requestPairingCode = async function () {
                     clearInterval(_botPollTimer);
                     clearInterval(_botDotsTimer);
                     clearInterval(_fallbackMessageTimer);
-
                     const titleEl = document.getElementById('bot-build-title');
                     const emojiEl = document.getElementById('bot-build-emoji');
                     const actionBtn = document.getElementById('bot-build-action');
-
                     if (titleEl) titleEl.innerHTML = "Bot Build Completed Successfully!";
                     if (msgEl) msgEl.textContent = "Your AI is fully trained and ready to handle leads.";
-                    if (emojiEl) {
-                        emojiEl.classList.remove('animate-pulse');
-                        emojiEl.textContent = "✅";
-                    }
+                    if (emojiEl) { emojiEl.classList.remove('animate-pulse'); emojiEl.textContent = "✅"; }
                     if (actionBtn) actionBtn.classList.remove('hidden');
+                }
+                
+                if (personaStatus === 'insufficient_funds' || personaStatus === 'failed') {
+                    clearInterval(_botPollTimer); clearInterval(_botDotsTimer); clearInterval(_fallbackMessageTimer);
+                    const titleEl = document.getElementById('bot-build-title');
+                    if (titleEl) { titleEl.innerHTML = "Bot Build Paused"; titleEl.classList.replace('text-[#28A745]', 'text-red-500'); }
+                    if (msgEl) msgEl.textContent = personaStatus === 'insufficient_funds' ? 'Insufficient credits. Please top up.' : 'An error occurred.';
                 }
             } catch (err) {}
         }, 5000); 
@@ -541,6 +555,7 @@ window.requestPairingCode = async function () {
         await advanceStep(6); 
     };
 
+    // ─── Render ────────────────────────────────────────────────────────────────
     function _render() {
         const el = document.getElementById('content-area');
         const d = window.onboardingData;
@@ -556,35 +571,23 @@ window.requestPairingCode = async function () {
                         <div class="flex items-center gap-3">
                             <span id="bot-build-emoji" class="text-2xl animate-pulse">🤖</span>
                             <div>
-                                <h4 id="bot-build-title" class="text-sm font-black text-[#28A745] uppercase tracking-wider">
-                                    Building your AI bot<span id="bot-loading-dots">...</span>
-                                </h4>
-                                <p id="bot-build-message" class="text-xs font-bold text-slate-500 mt-0.5">Organising data and preparing systems...</p>
+                                <h4 id="bot-build-title" class="text-sm font-black text-[#28A745] uppercase tracking-wider">Building your bot<span id="bot-loading-dots">...</span></h4>
+                                <p id="bot-build-message" class="text-xs font-bold text-slate-500 mt-0.5">Organising data...</p>
                             </div>
                         </div>
-                        <div id="bot-build-action" class="hidden">
-                            <button onclick="window.switchPage('playground')" class="px-5 py-2.5 bg-[#28A745] text-white text-xs font-black rounded-xl shadow-lg shadow-[#28A745]/20 hover:bg-[#218838] hover:scale-105 transition-all">
-                                Try it Out! 🚀
-                            </button>
-                        </div>
+                        <div id="bot-build-action" class="hidden"><button onclick="window.switchPage('playground')" class="px-5 py-2.5 bg-[#28A745] text-white text-xs font-black rounded-xl shadow-lg">Try it Out! 🚀</button></div>
                     </div>
                 </div>
 
                 <div class="mb-6 text-center md:text-left">
                     <h1 class="text-3xl font-black text-[#0F172A] mb-2 tracking-tight">Let's Get You Set Up</h1>
-                    <p class="text-sm text-slate-500 font-medium">Complete this quick checklist (&lt; 5 mins) to launch your AI.</p>
+                    <div class="mb-6 bg-slate-100 rounded-full h-2 overflow-hidden"><div class="h-2 bg-[#0F172A] transition-all duration-700" style="width:${progressPct}%"></div></div>
                 </div>
-
-                <div class="mb-6 bg-slate-100 rounded-full h-2 overflow-hidden">
-                    <div class="h-2 rounded-full bg-[#0F172A] transition-all duration-700"
-                         style="width:${progressPct}%"></div>
-                </div>
-                <p class="text-xs text-slate-400 font-bold mb-8 text-right -mt-4">${currentStep - 1} of 5 complete</p>
 
                 <div class="flex flex-col gap-3">
                     <div class="glass-card p-6 ${currentStep === 1 ? 'border-l-4 border-l-[#0F172A]' : 'opacity-50'}">
                         <div class="flex items-center justify-between">
-                            <div><h3 class="text-xl font-black text-[#0F172A]">Step 1: Load Credits</h3><p class="text-sm font-medium text-slate-500">Add KES 1,000 minimum to unlock AI systems.</p></div>
+                            <div><h3 class="text-xl font-black text-[#0F172A]">Step 1: Load Credits</h3><p class="text-sm font-medium text-slate-500">Minimum KES 1,000 required.</p></div>
                             <button onclick="initiatePayment()" class="${currentStep === 1 ? '' : 'hidden'} px-8 py-3.5 bg-[#0F172A] text-white font-bold rounded-xl shadow-lg">Add Credits</button>
                         </div>
                     </div>
@@ -597,65 +600,36 @@ window.requestPairingCode = async function () {
                     <div class="glass-card p-8 ${currentStep === 3 ? 'border-l-4 border-l-[#0F172A]' : 'opacity-50'}">
                         <div class="flex flex-col gap-3 w-full">
                             <div class="flex flex-col gap-1 px-1 mb-1">
-                                <span class="text-xs font-bold text-slate-500 flex justify-between">
-                                    Total Found: <span id="leads-found-count" class="text-[#0F172A] font-black">${d.leads_processed || 0}</span>
-                                </span>
-                                <span class="text-xs font-bold text-[#28A745] flex justify-between">
-                                    Available Balance: <span class="font-black">KES ${d.balance_kes ? parseFloat(d.balance_kes).toLocaleString() : '0.00'}</span>
-                                </span>
-                                <span class="text-xs font-bold text-slate-400 flex justify-between">
-                                    Activation Cost: <span class="text-[#28A745] font-black">KES <span id="leads-cost-display">0.00</span></span>
-                                </span>
+                                <span class="text-xs font-bold text-slate-500 flex justify-between">Found: <span class="text-[#0F172A] font-black">${d.leads_processed || 0}</span></span>
+                                <span class="text-xs font-bold text-[#28A745] flex justify-between">Balance: <span class="font-black">KES ${d.balance_kes ? parseFloat(d.balance_kes).toLocaleString() : '0.00'}</span></span>
+                                <span class="text-xs font-bold text-slate-400 flex justify-between">Cost: <span class="text-[#28A745] font-black">KES <span id="leads-cost-display">0.00</span></span></span>
                             </div>
-                            <input type="range" id="leads-slider" min="0" max="${d.leads_processed || 100}" value="0" 
-                                   oninput="updateLeadSlider(this.value)"
-                                   class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-[#0F172A]">
-                            <p class="text-center text-sm font-bold text-slate-700 mt-1">Activate <span id="leads-selected-display" class="text-[#0F172A] font-black text-lg">0</span> Leads</p>
+                            <input type="range" id="leads-slider" min="0" max="${d.leads_processed || 100}" value="0" oninput="updateLeadSlider(this.value)" class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-[#0F172A]">
+                            <p class="text-center text-sm font-bold mt-1">Activate <span id="leads-selected-display" class="text-[#0F172A] font-black text-lg">0</span> Leads</p>
                             <div class="flex flex-col gap-2 mt-2">
-                                <div class="flex gap-2">
-                                    <button id="activate-leads-btn" onclick="activateSelectedLeads()" class="flex-1 px-8 py-3 bg-[#0F172A] text-white font-bold rounded-xl shadow-lg">Activate</button>
-                                    <button onclick="skipLeads()" class="px-6 py-3 bg-slate-100 border border-slate-200 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-all">Skip</button>
-                                </div>
-                                <button onclick="window.location.reload()" class="text-[10px] text-blue-500 font-bold uppercase tracking-tighter hover:underline text-center">🔄 Refresh Found Count & Balance</button>
+                                <div class="flex gap-2"><button id="activate-leads-btn" onclick="activateSelectedLeads()" class="flex-1 px-8 py-3 bg-[#0F172A] text-white font-bold rounded-xl">Activate</button><button onclick="skipLeads()" class="px-6 py-3 bg-slate-100 border rounded-xl font-bold">Skip</button></div>
+                                <button onclick="window.location.reload()" class="text-[10px] text-blue-500 font-bold hover:underline text-center">🔄 Refresh Found Count & Balance</button>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <div id="wa-modal"
-                 class="fixed inset-0 z-[110] flex items-center justify-center p-4 opacity-0 pointer-events-none transition-opacity duration-300">
+            <div id="wa-modal" class="fixed inset-0 z-[1100] flex items-center justify-center p-4 opacity-0 pointer-events-none transition-opacity duration-300">
                 <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-md" onclick="closeWhatsAppModal()"></div>
-                <div id="wa-modal-content"
-                     class="glass-card w-full max-w-sm relative z-10 p-8 shadow-2xl border border-white/80
-                            transform scale-95 translate-y-4 opacity-0 transition-all duration-300 ease-out text-center">
-
-                    <div class="w-12 h-12 bg-[#28A745]/10 rounded-full flex items-center justify-center mb-4 mx-auto">
-                        <svg class="w-6 h-6 text-[#28A745]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                  d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"/>
-                        </svg>
-                    </div>
-
-                    <h2 class="text-2xl font-black text-[#0F172A] mb-2 tracking-tight">Link WhatsApp</h2>
-                    
-                    <div id="wa-loading-zone" class="py-6">
-                        <div class="w-8 h-8 border-4 border-slate-200 border-t-[#28A745] rounded-full animate-spin mx-auto mb-3"></div>
-                        <p id="wa-loader-text" class="text-sm font-bold text-slate-500 animate-pulse">Initializing...</p>
-                    </div>
-
+                <div id="wa-modal-content" class="glass-card w-full max-w-sm relative z-10 p-8 text-center bg-white">
+                    <h2 class="text-2xl font-black text-[#0F172A] mb-4">Link WhatsApp</h2>
+                    <div id="wa-loading-zone" class="py-6"><div class="w-8 h-8 border-4 border-t-[#28A745] rounded-full animate-spin mx-auto mb-3"></div><p id="wa-loader-text" class="text-sm font-bold text-slate-500">Initializing...</p></div>
                     <div id="wa-auth-zone" class="hidden my-4 flex flex-col items-center justify-center">
-                        <p class="text-xs text-slate-500 mb-4 font-medium text-center">Point phone camera toward this code to pair.</p>
-                        <div id="wa-qr-container" class="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4"><img id="wa-qr-img" class="w-48 h-48 mx-auto mix-blend-multiply" src="" /></div>
-                        <div id="wa-mobile-container" class="hidden text-left bg-[#0F172A]/5 border border-[#0F172A]/10 p-4 rounded-xl w-full mb-4"></div>
-                        <button id="mobile-toggle-btn" onclick="toggleMobileView()" class="text-xs font-bold text-slate-400 hover:text-[#28A745] underline cursor-pointer mb-2">Are you using a mobile phone? Click here</button>
-                        <button onclick="verifyAndProceed()" class="w-full mt-4 py-3 bg-[#28A745] text-white font-black rounded-xl shadow-lg hover:bg-[#218838] transition-all">I've Scanned It</button>
+                        <div id="wa-qr-container" class="bg-slate-50 p-4 rounded-xl border mb-4"><img id="wa-qr-img" class="w-48 h-48 mx-auto mix-blend-multiply" src="" /></div>
+                        <div id="wa-mobile-container" class="hidden text-left bg-slate-50 p-4 rounded-xl border mb-4"></div>
+                        <button id="mobile-toggle-btn" onclick="toggleMobileView()" class="text-xs font-bold text-slate-400 underline mb-2">Are you using a mobile phone?</button>
+                        <button onclick="verifyAndProceed()" class="w-full mt-4 py-3 bg-[#28A745] text-white font-black rounded-xl shadow-lg">I've Scanned It</button>
                     </div>
-
                     <button onclick="closeWhatsAppModal()" class="w-full mt-2 py-3.5 font-bold text-slate-500 hover:bg-slate-100 rounded-xl">Cancel</button>
                 </div>
             </div>`;
-
+        
         if (currentStep >= 4) setTimeout(() => window.startBotBuildPolling(), 100);
     }
 
@@ -663,20 +637,16 @@ window.requestPairingCode = async function () {
         const activeId = businessId || getBusinessId();
         const client = getSupabase();
         if (!client || !activeId) return;
-
         try {
-            const [onboardingRes, balanceRes] = await Promise.all([
+            const [onRes, balRes] = await Promise.all([
                 client.from('business_onboarding').select('*').eq('business_id', activeId).maybeSingle(),
                 client.from('business_balances').select('balance_kes').eq('business_id', activeId).maybeSingle()
             ]);
-
-            if (onboardingRes.data) {
-                window.onboardingData = onboardingRes.data;
-                window.onboardingData.balance_kes = balanceRes.data?.balance_kes || 0.00;
+            if (onRes.data) {
+                window.onboardingData = onRes.data;
+                window.onboardingData.balance_kes = balRes.data?.balance_kes || 0.00;
                 _render();
             }
-        } catch (err) {
-            console.error('[Onboarding] Fetch error:', err);
-        }
+        } catch (err) { console.error('[Onboarding] Fetch error:', err); }
     };
 })();
