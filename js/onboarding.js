@@ -146,11 +146,11 @@
                 // We poll the main 'businesses' table since that's where the webhook saves connection status
                 const { data } = await client
                     .from('businesses')
-                    .select('whatsapp_connected')
+                    .select('whatsapp_connected, status') // Added status check
                     .eq('business_id', businessId)
                     .single();
 
-                if (data?.whatsapp_connected) {
+                if (data?.whatsapp_connected || data?.status === 'connected') {
                     clearInterval(_waPollTimer);
                     if (_progressTextInterval) clearInterval(_progressTextInterval);
 
@@ -177,17 +177,25 @@ let _instanceName   = null;
 
     // ─── Step actions (exposed globally so inline onclick can reach them) ──────
     window.initiatePayment = async function () {
-        showToast('Initiating payment…');
-        // TODO: replace mock with real payment integration
+        // FIX: Check for real balance in business_balances
         const client = getSupabase();
-        if (client) {
-            await client.from('business_onboarding')
-                .update({ credits_paid: true })
-                .eq('business_id', getBusinessId());
+        const bizId = getBusinessId();
+        const { data } = await client.from('business_balances').select('balance_kes').eq('business_id', bizId).maybeSingle();
+        
+        if (data && data.balance_kes >= 1000) {
+            showToast('Existing credits detected!', 'success');
+            await client.from('business_onboarding').update({ credits_paid: true }).eq('business_id', bizId);
+            Object.assign(window.onboardingData, { credits_paid: true, balance_kes: data.balance_kes });
+            await advanceStep(2);
+        } else {
+            // Open the real payment modal defined in dashboard.html
+            if (typeof window.openAddFundsModal === 'function') {
+                const amountInput = document.getElementById('funds-amount');
+                if (amountInput) amountInput.value = 1000;
+                window.openAddFundsModal();
+                showToast('Please complete the KES 1,000 top-up.');
+            }
         }
-        Object.assign(window.onboardingData, { credits_paid: true });
-        showToast('Payment confirmed!');
-        await advanceStep(2);
     };
 
     window.openWhatsAppModal = async function () {
@@ -222,29 +230,44 @@ let _instanceName   = null;
         try {
             const businessId = getBusinessId();
             const websiteUrl = window.onboardingData?.website_url || "";
-            const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-ochestrator', {
+            // FIX: spelling to 'onboarding-orchestrator'
+            const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-orchestrator', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action: 'create_instance', businessId, websiteUrl })
             });
 
+            // Defensive JSON check to prevent position 4 parsing error
             if (!response.ok) {
-                const errData = await response.json().catch(() => ({}));
-                throw new Error(errData.error || `HTTP ${response.status}`);
+                const errText = await response.text();
+                throw new Error(`Server Error: ${errText || response.statusText}`);
             }
 
-            const data = await response.json();
+            const text = await response.text();
+            let data;
+            try { data = JSON.parse(text); } catch (e) { throw new Error("Invalid response format."); }
 
-           if (data?.qrcode) {
-    _instanceName = data.instance_name;
-    window._instanceToken = data.instance_token;  // ← add this
-    loadingZone.classList.add('hidden');
-    authZone.classList.remove('hidden');
-    const qr = data.qrcode;
-    qrImg.src = qr.startsWith('data:') ? qr : `data:image/png;base64,${qr}`;
-    startBackgroundStatusPolling();
+            if (data.status === 'ALREADY_CONNECTED' || data.status === 'CONNECTED' || (data.data && data.data.instance && data.data.instance.state === 'open')) {
+                showToast("WhatsApp already linked!", "success");
+                window.closeWhatsAppModal();
+                await advanceStep(3);
+                return;
+            }
+
+           if (data && (data.qrcode || data.data?.qrcode || data.data?.base64)) {
+                _instanceName = data.instance_name;
+                window._instanceToken = data.instance_token;  
+                loadingZone.classList.add('hidden');
+                authZone.classList.remove('hidden');
+                
+                // Robust QR Extraction
+                const rawQr = data.qrcode || data.data?.qrcode || data.data?.base64 || data.base64;
+                const cleanQr = String(rawQr).trim().replace(/["']/g, "");
+                qrImg.src = cleanQr.startsWith('data:image') ? cleanQr : `data:image/png;base64,${cleanQr}`;
+                
+                startBackgroundStatusPolling();
             } else {
-                throw new Error("No QR code returned from server.");
+                throw new Error(data.error || "No QR code returned from server.");
             }
         } catch (err) {
             console.error('[Onboarding] Orchestrator error:', err);
@@ -261,6 +284,25 @@ let _instanceName   = null;
                     <p class="text-xs text-red-600 font-medium">${err.message}</p>
                 </div>
             `;
+        }
+    };
+
+    window.verifyAndProceed = async function() {
+        const businessId = getBusinessId();
+        const client = getSupabase();
+        
+        showToast("Verifying connection...");
+        
+        const { data } = await client
+            .from('businesses')
+            .select('whatsapp_connected, status')
+            .eq('business_id', businessId)
+            .single();
+
+        if (data?.whatsapp_connected || data?.status === 'connected') {
+            await advanceStep(3); // Move to Leads Activation
+        } else {
+            showToast("Scan not detected yet. Please try again.", "error");
         }
     };
 
@@ -330,7 +372,7 @@ window.requestPairingCode = async function () {
     if (btn) { btn.disabled = true; btn.textContent = 'Requesting...'; }
 
     try {
-        const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-ochestrator', {
+        const response = await fetch('https://xgtnbxdxbbywvzrttixf.supabase.co/functions/v1/onboarding-orchestrator', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'pair_phone', instanceName: _instanceName, instanceToken: window._instanceToken, phoneNumber })
@@ -340,7 +382,7 @@ window.requestPairingCode = async function () {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
 
-        const code = data.pairing_code;
+        const code = data.pairing_code || data.code;
         const container = document.getElementById('wa-mobile-container');
         container.innerHTML = `
             <p class="text-[10px] font-bold text-[#0F172A] uppercase tracking-wider mb-3">Your Pairing Code</p>
@@ -433,12 +475,16 @@ window.requestPairingCode = async function () {
                 desc:  'Load your existing leads and start working them.',
                 icon:  `<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>`,
                 action: `
-                    <div class="flex flex-col gap-2 w-full md:w-auto">
-                        <p class="text-xs font-bold text-slate-500 text-center">Sync all historical leads automatically?</p>
-                        <div class="flex gap-2">
-                            <button onclick="processLeads(true)"  class="flex-1 px-8 py-3 bg-[#0F172A] text-white font-bold rounded-xl hover:bg-slate-800 transition-all shadow-lg">Yes</button>
-                            <button onclick="processLeads(false)" class="flex-1 px-8 py-3 bg-slate-100 border border-slate-200 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-all">No</button>
+                    <div class="flex flex-col gap-2 w-full md:w-[280px]">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="text-[10px] font-bold text-slate-500 uppercase">Leads Queue</span>
+                            <span class="text-xs font-black text-[#28A745]">Balance: KES ${d.balance_kes ? parseFloat(d.balance_kes).toLocaleString() : '0.00'}</span>
                         </div>
+                        <div class="flex gap-2">
+                            <button onclick="processLeads(true)"  class="flex-1 px-4 py-3 bg-[#0F172A] text-white font-bold rounded-xl hover:bg-slate-800 transition-all shadow-lg text-xs">Sync All</button>
+                            <button onclick="processLeads(false)" class="flex-1 px-4 py-3 bg-slate-100 border border-slate-200 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-all text-xs">Manual</button>
+                        </div>
+                        <button onclick="window.location.reload()" class="text-[9px] text-blue-500 font-bold uppercase hover:underline text-center mt-1">🔄 Refresh Found Count</button>
                     </div>`,
             },
             {
@@ -535,7 +581,7 @@ window.requestPairingCode = async function () {
                     <div class="w-12 h-12 bg-[#28A745]/10 rounded-full flex items-center justify-center mb-4 mx-auto">
                         <svg class="w-6 h-6 text-[#28A745]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                             <path stroke-linecap="round" stroke-linejoin="round"
-                                  d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"/>
+                                  d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"/>
                         </svg>
                     </div>
 
@@ -547,27 +593,11 @@ window.requestPairingCode = async function () {
                     </div>
 
                     <div id="wa-auth-zone" class="hidden my-4 flex flex-col items-center justify-center">
-                        <p class="text-xs text-slate-500 mb-4 font-medium">
-                            Point your phone camera toward this code screen to pair instantly.
-                        </p>
-                        
-                        <div id="wa-qr-container" class="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4">
-                            <img id="wa-qr-img" class="w-48 h-48 mx-auto mix-blend-multiply" src="" alt="WhatsApp QR Code"/>
-                        </div>
-
-                        <div id="wa-mobile-container" class="hidden text-left bg-[#0F172A]/5 border border-[#0F172A]/10 p-4 rounded-xl w-full mb-4">
-                            <p class="text-[10px] font-bold text-[#0F172A] uppercase tracking-wider mb-2">Mobile Instructions</p>
-                            <ol class="list-decimal list-inside text-xs text-slate-600 space-y-2 font-medium leading-relaxed">
-                                <li>Open <b>WhatsApp</b></li>
-                                <li>Tap <b>Linked Devices</b></li>
-                                <li>Select <b>Link with phone number</b></li>
-                                <li>Enter the pairing code shown above</li>
-                            </ol>
-                        </div>
-
-                        <button id="mobile-toggle-btn" onclick="toggleMobileView()" class="text-xs font-bold text-slate-400 hover:text-[#28A745] underline cursor-pointer mb-2">
-                            Are you using a mobile phone? Click here
-                        </button>
+                        <p class="text-xs text-slate-500 mb-4 font-medium text-center">Point your phone camera toward this code screen to pair instantly.</p>
+                        <div id="wa-qr-container" class="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4"><img id="wa-qr-img" class="w-48 h-48 mx-auto mix-blend-multiply" src="" alt="WhatsApp QR Code"/></div>
+                        <div id="wa-mobile-container" class="hidden text-left bg-[#0F172A]/5 border border-[#0F172A]/10 p-4 rounded-xl w-full mb-4"></div>
+                        <button id="mobile-toggle-btn" onclick="toggleMobileView()" class="text-xs font-bold text-slate-400 hover:text-[#28A745] underline cursor-pointer mb-2">Are you using a mobile phone? Click here</button>
+                        <button onclick="verifyAndProceed()" class="w-full mt-4 py-3 bg-[#28A745] text-white font-black rounded-xl shadow-lg hover:bg-[#218838] transition-all">I've Scanned It</button>
                     </div>
 
                     <button onclick="closeWhatsAppModal()"
@@ -580,67 +610,24 @@ window.requestPairingCode = async function () {
     }
 
     // ─── Expose render function ───────────────────────────────────────────────
-    // overviewRouter.js will call this when onboarding is incomplete
     window._renderOnboarding = async function (businessId) {
         const activeId = businessId || getBusinessId();
-        console.log('[Onboarding] _renderOnboarding called. businessId:', businessId, 'activeId:', activeId, 'onboardingDataLoaded:', !!window.onboardingData);
-
-        // If onboardingData is already loaded (nav.js fetched it), render immediately
-        if (window.onboardingData) {
-            _render();
-            return;
-        }
-
-        // Fallback: fetch ourselves if nav.js hasn't populated yet
-        let client = getSupabase();
-        if (!client && typeof window.waitForSupabase === 'function') {
-            console.warn('[Onboarding] Supabase client not ready; waiting briefly for CDN init.');
-            client = await window.waitForSupabase(2000, 100);
-        }
-
-        if (!client || !activeId) {
-            console.error('[Onboarding] No Supabase client or business ID.', {
-                hasClient: !!client,
-                businessId: activeId,
-                diagnostics: window.supabaseInitDiagnostics,
-            });
-            return;
-        }
+        const client = getSupabase();
+        if (!client || !activeId) return;
 
         try {
-            let { data, error } = await client
-                .from('business_onboarding')
-                .select('*')
-                .eq('business_id', activeId)
-                .maybeSingle();
+            const [onboardingRes, balanceRes] = await Promise.all([
+                client.from('business_onboarding').select('*').eq('business_id', activeId).maybeSingle(),
+                client.from('business_balances').select('balance_kes').eq('business_id', activeId).maybeSingle()
+            ]);
 
-            if (error) {
-                console.error('[Onboarding] Fallback fetch returned error:', error);
-            }
-
-            if (!data && !error) {
-                console.log('[Onboarding] No onboarding row found in fallback fetch; creating new row for', activeId);
-                const { data: newRow, error: insertError } = await client
-                    .from('business_onboarding')
-                    .insert({ business_id: activeId, current_step: 1, onboarding_complete: false })
-                    .select()
-                    .single();
-
-                if (insertError) {
-                    console.error('[Onboarding] Fallback insert returned error:', insertError);
-                }
-                data = newRow;
-            }
-
-            if (data) {
-                window.onboardingData = data;
+            if (onboardingRes.data) {
+                window.onboardingData = onboardingRes.data;
+                window.onboardingData.balance_kes = balanceRes.data?.balance_kes || 0.00;
                 _render();
-            } else {
-                console.warn('[Onboarding] Fallback fetch returned no data for', activeId, 'diagnostics:', window.supabaseInitDiagnostics);
             }
         } catch (err) {
-            console.error('[Onboarding] Fetch error:', err, 'diagnostics:', window.supabaseInitDiagnostics);
-            throw err; // let nav.js show the error state
+            console.error('[Onboarding] Fetch error:', err);
         }
     };
 })();
